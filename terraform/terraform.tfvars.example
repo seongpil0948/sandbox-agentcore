@@ -1,0 +1,21 @@
+# Copy to terraform.tfvars and customize, then run terraform plan/apply.
+#   cp terraform.tfvars.example terraform.tfvars
+
+# Optional: set an explicit ARM64 runtime image URI.
+# Leave this unset (default) to let `terraform apply` build and push the image
+# automatically via CodeBuild. Set it only to reuse a pre-built image and skip
+# the build pipeline.
+# runtime_image_uri = "<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/sandbox-agentcore:latest"
+
+image_tag           = "latest"
+ecr_repository_name  = "sandbox-agentcore"
+orchestrator_name    = "orchestrator"
+supervisor_name      = "supervisor_hr"
+leaf_name            = "leaf_cert"
+memory_name          = "agent_memory"
+network_mode         = "PUBLIC"
+
+# Optional overrides (defaults shown).
+name_prefix = "sandbox-agentcore"
+region      = "us-east-1"
+environment = "dev"

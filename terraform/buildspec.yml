@@ -1,0 +1,32 @@
+version: 0.2
+
+# Builds the ARM64 AgentCore runtime image and pushes it to ECR.
+# CodeBuild extracts the S3 source zip into $CODEBUILD_SRC_DIR (repo root with
+# Dockerfile, pyproject.toml, and apps/).
+
+phases:
+  install:
+    commands:
+      - echo Installing dependencies...
+      - yum install -y unzip
+
+  pre_build:
+    commands:
+      - cd $CODEBUILD_SRC_DIR
+      - ls -la
+      - echo Logging in to Amazon ECR...
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+
+  build:
+    commands:
+      - echo Build started on `date`
+      - echo Building ARM64 runtime image...
+      - docker build --platform linux/arm64 -t $IMAGE_REPO_NAME:$IMAGE_TAG .
+      - docker tag $IMAGE_REPO_NAME:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG
+
+  post_build:
+    commands:
+      - echo Build completed on `date`
+      - echo Pushing image to ECR...
+      - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG
+      - echo ARM64 runtime image pushed successfully

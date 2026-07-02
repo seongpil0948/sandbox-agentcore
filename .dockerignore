@@ -1,0 +1,20 @@
+# Build context excludes — only pyproject.toml + apps/ are needed for the image.
+.venv/
+.uv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.git/
+.github/
+terraform/
+tests/
+doc/
+*.md
+.env
+.envrc
+uv.lock
+dist/
+build/
