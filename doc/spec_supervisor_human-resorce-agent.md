@@ -52,6 +52,19 @@ Orchestrator
 HR resource manager supervisor routes credential & identity queries to specialist leaf agents:
 - **Cert management:** certificate expiry, renewal, types → `cert_specialist` (cert leaf)
 - **Account/principal:** user/service account lookup, onboarding, offboarding → `account_manager` (account leaf)
+- **Cross-domain governance:** lifecycle audit and type coverage checks stay in supervisor scope
+
+### Why `principal_lifecycle_auditor` and `principal_type_coverage` are in supervisor
+
+These two tools are intentionally **not** part of `account_manager`:
+
+- `principal_lifecycle_auditor` must validate manageability across account, credential,
+    certificate, and secret lifecycles. This is cross-leaf logic, not account-only logic.
+- `principal_type_coverage` verifies policy/coverage across principal types
+    (`user`, `service_account`, `application`, `workload`, etc.).
+    This is governance/routing scope, so it belongs to the coordinator layer.
+- Keeping them in supervisor preserves clear responsibilities:
+    leaf agents execute domain operations, supervisor performs cross-domain assurance.
 
 Enforces **human approval** before any write operation via Strands interrupts + Slack HITL.
 
@@ -140,6 +153,8 @@ def build_hr_supervisor(
 |------|----------|---------|
 | certificate, expiry, renewal, TLS/SSL, domain | `cert_specialist` | `"Renew certificate for api.example.com"` |
 | user, account, principal, onboard, offboard | `account_manager` | `"Create service account for CI/CD"` |
+| lifecycle audit, manageability, readiness across resources | `principal_lifecycle_auditor` | `"Audit lifecycle for deploy-bot"` |
+| type coverage, principal taxonomy coverage | `principal_type_coverage` | `"Show lifecycle coverage by principal type"` |
 | (unknown) | Model inference | Asked to model; routed to cert or account |
 
 ## 🔄 Interrupt bubbling (Phase 1, native)
@@ -181,12 +196,12 @@ stateDiagram-v2
 
 ## ⚙️ Tools (agents-as-tools)
 
-| Tool | Recipient | Interrupt capable | Status |
-|------|-----------|-------------------|--------|
-| `cert_specialist` | cert leaf agent (`.as_tool`) | ✅ yes (bubbles cert interrupts) | ✅ Phase 1 |
-| `account_manager` | account leaf agent (`.as_tool`) | ✅ yes (bubbles account interrupts) | ✅ Phase 1 |
-| `principal_lifecycle_auditor` | read-only verifier (`@tool`) | ❌ no | ✅ Phase 1 |
-| `principal_type_coverage` | read-only verifier (`@tool`) | ❌ no | ✅ Phase 1 |
+| Tool | Recipient | Interrupt capable | Status | Layer rationale |
+|------|-----------|-------------------|--------|-----------------|
+| `cert_specialist` | cert leaf agent (`.as_tool`) | ✅ yes (bubbles cert interrupts) | ✅ Phase 1 | certificate domain execution |
+| `account_manager` | account leaf agent (`.as_tool`) | ✅ yes (bubbles account interrupts) | ✅ Phase 1 | account/principal domain execution |
+| `principal_lifecycle_auditor` | read-only verifier (`@tool`) | ❌ no | ✅ Phase 1 | cross-leaf lifecycle audit (supervisor scope) |
+| `principal_type_coverage` | read-only verifier (`@tool`) | ❌ no | ✅ Phase 1 | principal taxonomy governance (supervisor scope) |
 
 ## 🌐 Deployment
 
@@ -208,55 +223,12 @@ Supervisor becomes its own runtime; invokes children via boto3 `invoke_agent_run
 - **Agents-as-tools + interrupts:** `Agent.as_tool(..., preserve_context=True)` (native bubble + resume)
 - **Session manager:** `apps/runtime/session.py` (durable state)
 
-- Detection (read): `check_cert_expiry` via `cert_specialist`.
-- Renewal (write): HITL-gated interrupt is implemented (Phase 1); real resource mutation (Terraform/SSM) is design-only (below).
+## 🔒 Mutation policy in this supervisor spec
 
-### Credential write actions — HITL required *(design-only)*
-
-실제 리소스를 변경할 때의 규칙:
-
-- **Terraform + GitHub Pull Request** 를 통해서만 변경(declarative · reviewable · revertible).
-- **AWS CLI / kubectl 은 read-only / 검증 용도로만** 사용 — 직접 mutation 금지.
-- Human-in-the-Loop:
-  - 단기 작업: Strands **Interrupts / Interventions** (synchronous approval).
-  - 장기 작업: **Step Functions callback token + Slack** notification (async approval).
-  - Current sandbox: Slack Block Kit buttons emulate HITL/interrupt and resume via
-    `apps/slack/workflows.py`.
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant O as Orchestrator
-    participant S as HR Supervisor
-    participant H as Human approver
-    U->>O: "Renew nginx.internal cert"
-    O->>S: as_tool(human_resource_supervisor)
-    S->>S: cert_specialist -> request_certificate_renewal
-    S-->>H: interrupt → Slack Block Kit ([승인]/[취소])
-    H-->>S: click [승인]
-    S-->>S: hitl.resume forwards response to the paused tool
-    Note over S: record approved outcome (SSH/ACM path) — sandbox, no live change
-    S-->>O: status (stop_reason bubbles up via as_tool)
-    O-->>U: summary
-```
-
-References:
-[Interventions/HITL](https://strandsagents.com/docs/user-guide/concepts/agents/interventions/human-in-the-loop/),
-[Interrupts](https://strandsagents.com/docs/user-guide/concepts/interrupts)
-
-### Identity provider integration *(design-only)*
-
-| System | Role in design |
-|--------|----------------|
-| AWS IAM / Identity Center | authoritative AWS principals & permission sets |
-| Amazon Cognito | application user pools (human end-users) |
-| Keycloak | enterprise SSO / OIDC broker |
-| Kerberos | on-prem enterprise auth (KDC tickets) |
-| OpenFGA | relationship-based fine-grained authz |
-| OPA | policy-as-code decision point (Rego) |
-
-These describe how the supervisor *would* resolve and authorize principals; none are wired
-into the current sandbox.
+- Phase 1 supervisor behavior is orchestration + approval-gated intent recording.
+- Read-only checks can run directly.
+- Write-capable requests must pause via Strands interrupt and resume only after approval.
+- In this sandbox, approved resume records/simulates intent; no direct live mutation is performed.
 
 ### Account-manager leaf
 

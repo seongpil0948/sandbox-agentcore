@@ -4,11 +4,16 @@ from strands import Agent, tool
 from strands.models import BedrockModel
 from strands.types.tools import ToolContext
 
+from apps.agents.iam_terraform import render_iam_terraform
 from apps.mock_data import (
     PRINCIPAL_TYPES as MOCK_PRINCIPAL_TYPES,
     PRINCIPALS,
+    basic_credential_names,
     certificate_domains,
+    get_certificate,
     get_principal,
+    get_secret,
+    iam_access_gaps,
     select_principals,
     secret_names,
 )
@@ -23,10 +28,12 @@ _APPROVE_TOKENS = frozenset({"approve", "approved", "yes", "y", "confirm", "exec
 
 
 def _format_list(values: list[str]) -> str:
+    """Render a deterministic bracketed list for compact text responses."""
     return "[" + ", ".join(values) + "]"
 
 
 def _format_principal(info: dict[str, Any]) -> str:
+    """Render one principal record in a compact key=value format."""
     return (
         f"principal={info['principal']} type={info['type']} owner={info['owner']} "
         f"status={info['status']} accounts={_format_list(info['accounts'])} "
@@ -64,15 +71,50 @@ def list_access(principal: str) -> str:
 
 @tool
 def validate_onboarding(principal: str) -> str:
-    """Validate onboarding readiness for a principal."""
+    """Validate onboarding readiness for a principal, including IAM permission gaps."""
     info = get_principal(principal)
     if not info:
         return f"No onboarding record found for principal '{principal}'."
     if info["status"] != "onboarding":
         return f"principal={info['principal']} onboarding_status=not_applicable current_status={info['status']}"
+    gaps = iam_access_gaps(principal)
+    if gaps:
+        iam_part = (
+            f" iam_gaps={_format_list([gap.name for gap in gaps])} "
+            "iam_next_action=call propose_iam_terraform to generate the Terraform that closes them"
+        )
+    else:
+        iam_part = " iam_gaps=none"
     return (
         f"principal={info['principal']} onboarding_status=blocked "
-        f"missing={_format_list(info['risks'])} next_action=complete required account setup"
+        f"missing={_format_list(info['risks'])}{iam_part} "
+        "next_action=complete required account setup"
+    )
+
+
+@tool
+def propose_iam_terraform(principal: str) -> str:
+    """Detect a principal's IAM permission gaps and propose Terraform to close them.
+
+    Read-only advisory: emits ``terraform-aws-modules/iam/aws`` module blocks for every missing
+    IAM access requirement (read-only policies, custom policies, assume-role grants). The agent
+    performs no live change — a human reviews and applies the proposal."""
+    info = get_principal(principal)
+    if not info:
+        return f"No principal record found for '{principal}'."
+    gaps = iam_access_gaps(principal)
+    if not gaps:
+        return (
+            f"principal={principal} iam_gaps=none — no IAM permission gap detected; "
+            "no Terraform needed."
+        )
+    hcl = render_iam_terraform(gaps)
+    return (
+        f"principal={principal} iam_gaps={len(gaps)} "
+        f"gaps={_format_list([gap.name for gap in gaps])} "
+        "module=terraform-aws-modules/iam/aws\n\n"
+        f"```hcl\n{hcl}```\n"
+        "Advisory only — review and apply via your IaC pipeline. Sandbox: no live change executed."
     )
 
 
@@ -134,29 +176,39 @@ def list_principals(principal_type: str = "") -> str:
 
 @tool
 def list_linked_resources(principal: str) -> str:
-    """List linked certificate and aws_secret resources for a principal."""
+    """List certificate, secret, and basic credential resources linked to a principal."""
     certs = certificate_domains(principal)
     secrets = secret_names(principal)
-    if not certs and not secrets:
+    basics = basic_credential_names(principal)
+    if not certs and not secrets and not basics:
         return f"principal={principal} linked_resources=[]"
-    resources = [
-        *(f"nginx_certificate:{domain}" for domain in certs),
-        *(f"aws_secret:{name}" for name in secrets),
-    ]
+    resources: list[str] = []
+    for domain in certs:
+        record = get_certificate(domain)
+        rtype = record.resource_type if record else "certificate"
+        resources.append(f"{rtype}:{domain}")
+    for name in secrets:
+        record2 = get_secret(name)
+        rtype2 = record2.resource_type if record2 else "aws_secret"
+        resources.append(f"{rtype2}:{name}")
+    for name in basics:
+        resources.append(f"basic_credential:{name}")
     return f"principal={principal} linked_resources={_format_list(resources)}"
 
 
 def _linked_resources(principal: str) -> dict[str, list[str]]:
+    """Return linked resource names grouped by certificates, secrets, and basic credentials."""
     return {
         "certificates": certificate_domains(principal),
         "secrets": secret_names(principal),
+        "basic_credentials": basic_credential_names(principal),
     }
 
 
 def _account_reason(
     kind: str, title: str, principal: str, detail: dict[str, Any]
 ) -> dict[str, Any]:
-    """Structured payload for an account write-approval interrupt (rendered by the Slack layer)."""
+    """Build the structured payload for account write-approval interrupts."""
     info = get_principal(principal)
     return {
         "kind": kind,
@@ -199,7 +251,8 @@ def request_account_create(
 @tool(context=True)
 def request_account_update(tool_context: ToolContext, principal: str, change: str = "") -> str:
     """Request an update to an existing principal/account (status, access, owner, credentials).
-    Write action: pauses for human approval and records the approved change only."""
+    Write action: pauses for human approval and records the approved change only (no live
+    mutation)."""
     reason = _account_reason(
         "account_update",
         f"계정 변경 승인 — {principal}",
@@ -233,6 +286,7 @@ def request_account_delete(tool_context: ToolContext, principal: str) -> str:
     revoke = [
         *(f"certificate:{d}" for d in linked["certificates"]),
         *(f"secret:{s}" for s in linked["secrets"]),
+        *(f"basic_credential:{b}" for b in linked["basic_credentials"]),
     ]
     revoke_note = f" Linked resources to revoke: {_format_list(revoke)}." if revoke else ""
     return (
@@ -242,6 +296,7 @@ def request_account_delete(tool_context: ToolContext, principal: str) -> str:
 
 
 def build_account_manager_agent(model: BedrockModel, session_manager: Any | None = None) -> Agent:
+    """Build the account manager specialist agent."""
     return Agent(
         model=model,
         name="account_manager",
@@ -256,21 +311,29 @@ def build_account_manager_agent(model: BedrockModel, session_manager: Any | None
             validate_onboarding,
             validate_offboarding,
             find_stale_accounts,
+            propose_iam_terraform,
             request_account_create,
             request_account_update,
             request_account_delete,
         ],
         system_prompt=(
             "You are an account-manager specialist. People, service accounts, applications, "
-            "workloads, and agent identities are all principals, and each can own certificates "
-            "and secrets. Rules:\n"
+            "workloads, and agent identities are all principals, and each can own certificates, "
+            "secrets, and basic credentials. Rules:\n"
             "- Read questions (who owns what, access, onboarding/offboarding status, stale "
             "accounts) → call the matching read tool (lookup_principal, list_accounts, "
             "list_access, list_credentials, list_principals, list_linked_resources, "
             "validate_onboarding, validate_offboarding, find_stale_accounts).\n"
+            "- Onboarding readiness → call validate_onboarding; it reports missing MFA/Slack "
+            "AND any IAM permission gaps.\n"
+            "- Missing IAM permissions / access gaps / 'grant access' / 'generate terraform' / "
+            "'fix IAM' → immediately call propose_iam_terraform; it emits "
+            "terraform-aws-modules/iam/aws code to close the gaps (advisory, no live change).\n"
             "- Create a principal/account → immediately call request_account_create.\n"
             "- Update/modify a principal/account → immediately call request_account_update.\n"
             "- Delete/offboard/close a principal/account → immediately call request_account_delete.\n"
+            "- Credential renewal, secret rotation, or password reset → these belong to the "
+            "credential_specialist (the supervisor routes there); do NOT handle them here.\n"
             "Parse the principal name (and type/owner/change when present) from the user's "
             "message. Call the write tool EVEN IF some details are missing — it pauses for human "
             "approval. NEVER ask the user to restate the principal or provide details in plain "

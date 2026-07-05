@@ -8,8 +8,10 @@ from apps.agents.leaf_account_manager import (
     list_access,
     list_accounts,
     list_credentials,
+    list_linked_resources,
     list_principals,
     lookup_principal,
+    propose_iam_terraform,
     validate_offboarding,
     validate_onboarding,
 )
@@ -182,6 +184,31 @@ def test_validate_onboarding() -> None:
     assert "mfa-not-enrolled" in result
 
 
+def test_validate_onboarding_surfaces_iam_gaps() -> None:
+    result = validate_onboarding("new.engineer")
+    assert "iam_gaps=" in result
+    assert "base-engineering-readonly" in result
+    assert "propose_iam_terraform" in result
+
+
+def test_propose_iam_terraform_emits_module_for_gaps() -> None:
+    result = propose_iam_terraform("new.engineer")
+    assert "terraform-aws-modules/iam/aws" in result
+    assert "iam-read-only-policy" in result
+    assert "sts:AssumeRole" in result
+    assert "no live change executed" in result
+
+
+def test_propose_iam_terraform_reports_no_gap_when_clean() -> None:
+    # payments-api has no IAM access requirements recorded.
+    result = propose_iam_terraform("payments-api")
+    assert "iam_gaps=none" in result
+
+
+def test_propose_iam_terraform_unknown_principal() -> None:
+    assert "No principal record found" in propose_iam_terraform("ghost")
+
+
 def test_validate_offboarding() -> None:
     result = validate_offboarding("leaving.contractor")
     assert "offboarding_status=action_required" in result
@@ -222,3 +249,11 @@ def test_list_principals_lists_all_types_when_unfiltered() -> None:
     result = list_principals()
     for principal in ("deploy-bot", "new.engineer", "payments-api", "batch-runner"):
         assert principal in result
+
+
+def test_list_linked_resources_uses_correct_cert_type() -> None:
+    # Bug fix: api.example.com is acm_certificate, not nginx_certificate.
+    result = list_linked_resources("payments-api")
+    assert "acm_certificate:api.example.com" in result
+    assert "nginx_certificate:api.example.com" not in result
+    assert "aws_secret:payments-api-db" in result

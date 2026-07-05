@@ -10,7 +10,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any
 
-# Principal resource types
+# Principal resource types (subtypes)
 RESOURCE_TYPE_USER = "user"
 RESOURCE_TYPE_CONTRACTOR = "contractor"
 RESOURCE_TYPE_SERVICE_ACCOUNT = "service_account"
@@ -23,6 +23,22 @@ RESOURCE_TYPE_NGINX_CERTIFICATE = "nginx_certificate"
 RESOURCE_TYPE_ACM_CERTIFICATE = "acm_certificate"
 RESOURCE_TYPE_AWS_SECRET = "aws_secret"
 RESOURCE_TYPE_AWS_ACCOUNT = "aws_account"
+RESOURCE_TYPE_BASIC_CREDENTIAL = "basic_credential"
+
+# Principal category layer: human principals vs service-account principals.
+# application, workload, and agent_identity are service_account-category concepts —
+# they share the same credential lifecycle management patterns.
+PRINCIPAL_CATEGORY_HUMAN = "human"
+PRINCIPAL_CATEGORY_SERVICE_ACCOUNT = "service_account"
+
+PRINCIPAL_TYPE_TO_CATEGORY: dict[str, str] = {
+    RESOURCE_TYPE_USER: PRINCIPAL_CATEGORY_HUMAN,
+    RESOURCE_TYPE_CONTRACTOR: PRINCIPAL_CATEGORY_HUMAN,
+    RESOURCE_TYPE_SERVICE_ACCOUNT: PRINCIPAL_CATEGORY_SERVICE_ACCOUNT,
+    RESOURCE_TYPE_APPLICATION: PRINCIPAL_CATEGORY_SERVICE_ACCOUNT,
+    RESOURCE_TYPE_WORKLOAD: PRINCIPAL_CATEGORY_SERVICE_ACCOUNT,
+    RESOURCE_TYPE_AGENT_IDENTITY: PRINCIPAL_CATEGORY_SERVICE_ACCOUNT,
+}
 
 PRINCIPAL_TYPES = (
     RESOURCE_TYPE_USER,
@@ -32,6 +48,14 @@ PRINCIPAL_TYPES = (
     RESOURCE_TYPE_WORKLOAD,
     RESOURCE_TYPE_AGENT_IDENTITY,
 )
+
+# Renewal/rotation methods keyed by credential resource_type.
+CREDENTIAL_RENEWAL_METHODS: dict[str, str] = {
+    RESOURCE_TYPE_NGINX_CERTIFICATE: "certbot renew over SSH + nginx reload",
+    RESOURCE_TYPE_ACM_CERTIFICATE: "ACM renew / re-import via ACM API",
+    RESOURCE_TYPE_AWS_SECRET: "Secrets Manager rotation via API",
+    RESOURCE_TYPE_BASIC_CREDENTIAL: "password reset via identity provider (IdP)",
+}
 
 
 @dataclass(frozen=True)
@@ -79,6 +103,42 @@ class AccountRecord:
     joined_method: str
 
 
+@dataclass(frozen=True)
+class BasicCredentialRecord:
+    name: str
+    resource_type: str
+    principal: str
+    idp: str
+    status: str
+    last_changed: str
+    days_since_change: int
+    managed_via: str
+    management_endpoint: str
+
+
+@dataclass(frozen=True)
+class IamAccessRequirement:
+    """One IAM access requirement for a principal, and whether it is currently satisfied.
+
+    An unsatisfied requirement is an *IAM permission gap* the account leaf can detect and close
+    by proposing Terraform (``terraform-aws-modules/iam/aws``). ``kind`` selects the submodule:
+
+    - ``read_only_policy`` → ``iam-read-only-policy`` (uses ``allowed_services``)
+    - ``assumable_role`` → ``iam-policy`` granting ``sts:AssumeRole`` on ``assume_role_arns``
+    - ``policy`` → ``iam-policy`` with explicit ``actions`` / ``resources``
+    """
+
+    principal: str
+    name: str
+    kind: str
+    description: str
+    satisfied: bool
+    actions: tuple[str, ...] = ()
+    resources: tuple[str, ...] = ()
+    allowed_services: tuple[str, ...] = ()
+    assume_role_arns: tuple[str, ...] = ()
+
+
 PRINCIPALS: dict[str, dict[str, Any]] = {
     "deploy-bot": {
         "principal": "deploy-bot",
@@ -101,7 +161,7 @@ PRINCIPALS: dict[str, dict[str, Any]] = {
         "status": "onboarding",
         "accounts": ["identity-center:new.engineer", "github:new-engineer"],
         "access": ["base-engineering", "vpn-required"],
-        "credentials": ["password pending", "mfa pending"],
+        "credentials": ["basic=new.engineer-password", "mfa pending"],
         "risks": ["mfa-not-enrolled", "slack-account-missing"],
     },
     "leaving.contractor": {
@@ -111,7 +171,7 @@ PRINCIPALS: dict[str, dict[str, Any]] = {
         "status": "offboarding",
         "accounts": ["identity-center:leaving.contractor", "github:leaving-contractor"],
         "access": ["contractor-readonly", "legacy-repo-access"],
-        "credentials": ["password active", "github-token age=124d"],
+        "credentials": ["basic=leaving.contractor-password", "github-token age=124d"],
         "risks": ["legacy-repo-access", "github-token-active"],
     },
     "payments-api": {
@@ -155,7 +215,83 @@ CERTIFICATE_TYPE_DESCRIPTIONS = [
     "certbot-dns-route53 (auto-renew via DNS challenge)",
     "ACM public cert (auto-renew managed by AWS)",
     "ACM imported cert (no auto-renew; must re-import or manually renew on expiry)",
+    "AWS Secrets Manager secret (rotation via API or Lambda)",
+    "basic credential / password (reset via identity provider)",
 ]
+
+BASIC_CREDENTIALS: dict[str, BasicCredentialRecord] = {
+    "new.engineer-password": BasicCredentialRecord(
+        name="new.engineer-password",
+        resource_type=RESOURCE_TYPE_BASIC_CREDENTIAL,
+        principal="new.engineer",
+        idp="AWS IAM Identity Center",
+        status="pending",
+        last_changed="(never — onboarding)",
+        days_since_change=-1,
+        managed_via="identity_api",
+        management_endpoint="https://identitycenter.amazonaws.com",
+    ),
+    "leaving.contractor-password": BasicCredentialRecord(
+        name="leaving.contractor-password",
+        resource_type=RESOURCE_TYPE_BASIC_CREDENTIAL,
+        principal="leaving.contractor",
+        idp="AWS IAM Identity Center",
+        status="active",
+        last_changed="2025-09-01",
+        days_since_change=307,
+        managed_via="identity_api",
+        management_endpoint="https://identitycenter.amazonaws.com",
+    ),
+}
+
+
+# Per-principal IAM access requirements. Unsatisfied entries are IAM permission gaps the account
+# leaf detects during onboarding/access review and closes by proposing Terraform.
+IAM_ACCESS_REQUIREMENTS: dict[str, list[IamAccessRequirement]] = {
+    "new.engineer": [
+        IamAccessRequirement(
+            principal="new.engineer",
+            name="base-engineering-readonly",
+            kind="read_only_policy",
+            description="Base engineering read-only access to core AWS services",
+            satisfied=False,
+            allowed_services=("ec2", "s3", "cloudwatch", "logs"),
+        ),
+        IamAccessRequirement(
+            principal="new.engineer",
+            name="dev-deployer-assume",
+            kind="assumable_role",
+            description="Assume the shared dev-deployer role in the staging account",
+            satisfied=False,
+            assume_role_arns=("arn:aws:iam::444455556666:role/dev-deployer",),
+        ),
+    ],
+    "deploy-bot": [
+        IamAccessRequirement(
+            principal="deploy-bot",
+            name="ecr-push",
+            kind="policy",
+            description="Push container images to ECR",
+            satisfied=True,
+            actions=(
+                "ecr:GetAuthorizationToken",
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:PutImage",
+                "ecr:UploadLayerPart",
+            ),
+            resources=("*",),
+        ),
+        IamAccessRequirement(
+            principal="deploy-bot",
+            name="eks-rollout",
+            kind="policy",
+            description="Describe and roll out EKS deployments",
+            satisfied=False,
+            actions=("eks:DescribeCluster", "eks:ListClusters"),
+            resources=("*",),
+        ),
+    ],
+}
 
 CERTIFICATES: dict[str, CertificateRecord] = {
     "api.example.com": CertificateRecord(
@@ -306,14 +442,31 @@ def _principal_key(principal: str) -> str:
     return principal.strip().lower()
 
 
+def principal_category(principal_type: str) -> str:
+    """Return the category (human or service_account) for a principal subtype."""
+    return PRINCIPAL_TYPE_TO_CATEGORY.get(
+        principal_type.strip().lower(), PRINCIPAL_CATEGORY_SERVICE_ACCOUNT
+    )
+
+
 def get_principal(principal: str) -> dict[str, Any] | None:
     return PRINCIPALS.get(_principal_key(principal))
 
 
 def select_principals(principal_type: str | None = None) -> list[dict[str, Any]]:
+    """Return principals filtered by category name or exact subtype.
+
+    Passing ``"service_account"`` matches all SA-category subtypes (service_account,
+    application, workload, agent_identity). Passing a specific subtype like
+    ``"application"`` matches only that subtype. Pass ``None`` / ``""`` for all.
+    """
     if not principal_type:
         return list(PRINCIPALS.values())
     key = principal_type.strip().lower()
+    # Category-first match: "service_account" or "human" returns all principals of that category.
+    if key in (PRINCIPAL_CATEGORY_HUMAN, PRINCIPAL_CATEGORY_SERVICE_ACCOUNT):
+        return [info for info in PRINCIPALS.values() if principal_category(info["type"]) == key]
+    # Exact subtype match.
     return [info for info in PRINCIPALS.values() if info["type"] == key]
 
 
@@ -334,6 +487,20 @@ def certificate_domains(principal: str) -> list[str]:
 
 def secret_names(principal: str) -> list[str]:
     return _linked_resources(principal, "secret=")
+
+
+def basic_credential_names(principal: str) -> list[str]:
+    return _linked_resources(principal, "basic=")
+
+
+def iam_access_requirements(principal: str) -> list[IamAccessRequirement]:
+    """Return every IAM access requirement recorded for a principal."""
+    return IAM_ACCESS_REQUIREMENTS.get(_principal_key(principal), [])
+
+
+def iam_access_gaps(principal: str) -> list[IamAccessRequirement]:
+    """Return the unsatisfied IAM access requirements (permission gaps) for a principal."""
+    return [req for req in iam_access_requirements(principal) if not req.satisfied]
 
 
 def list_certificates() -> list[CertificateRecord]:
@@ -400,3 +567,24 @@ def create_account_request_id(name: str, email: str) -> str:
     """Deterministic AWS-Organizations-style CreateAccountStatus id (offline stub)."""
     digest = hashlib.sha256(f"{name.strip().lower()}|{email.strip().lower()}".encode()).hexdigest()
     return f"car-{digest[:32]}"
+
+
+def list_basic_credentials() -> list[BasicCredentialRecord]:
+    return list(BASIC_CREDENTIALS.values())
+
+
+def get_basic_credential(name: str) -> BasicCredentialRecord | None:
+    return BASIC_CREDENTIALS.get(name.strip().lower())
+
+
+def search_basic_credentials(query: str) -> list[BasicCredentialRecord]:
+    needle = query.strip().lower()
+    if not needle:
+        return list_basic_credentials()
+    return [
+        record
+        for record in BASIC_CREDENTIALS.values()
+        if needle in record.name.lower()
+        or needle in record.principal.lower()
+        or needle in record.status.lower()
+    ]

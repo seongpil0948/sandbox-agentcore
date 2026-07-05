@@ -7,7 +7,7 @@ from strands import Agent
 from strands.models import BedrockModel
 
 from apps.agents.leaf_account_manager import build_account_manager_agent
-from apps.agents.leaf_cert import build_cert_agent
+from apps.agents.leaf_credential import build_credential_agent
 from apps.agents.orchestrator import build_orchestrator
 from apps.agents.supervisor_hr import build_hr_supervisor
 
@@ -36,7 +36,7 @@ def build_agent(role: str, model: BedrockModel, session_manager: Any | None = No
             session_manager=session_manager,
         )
     if normalized_role == AGENT_ROLE_LEAF:
-        return build_cert_agent(model, session_manager=session_manager)
+        return build_credential_agent(model, session_manager=session_manager)
     if normalized_role in ACCOUNT_MANAGER_ALIASES:
         return build_account_manager_agent(model, session_manager=session_manager)
     if normalized_role == AGENT_ROLE_ORCHESTRATOR:

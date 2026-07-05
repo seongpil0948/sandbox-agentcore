@@ -153,8 +153,144 @@ def test_interrupt_blocks_approve_button_carries_response_key() -> None:
 def test_build_hitl_options_returns_certificate_choices() -> None:
     options = build_hitl_options(ACTION_HITL_SELECT, "nginx")
     values = {opt["value"] for opt in options}
-    assert "nginx.internal" in values
+    assert "cert:nginx.internal" in values
     assert build_hitl_options("other_action", "nginx") == []
+
+
+def test_build_hitl_options_cert_scope_excludes_secrets() -> None:
+    options = build_hitl_options(ACTION_HITL_SELECT, "", "cert")
+    values = {opt["value"] for opt in options}
+    assert all(v.startswith("cert:") for v in values)
+    assert not any(v.startswith("secret:") for v in values)
+
+
+def test_build_hitl_options_secret_scope_excludes_certs() -> None:
+    options = build_hitl_options(ACTION_HITL_SELECT, "", "secret")
+    values = {opt["value"] for opt in options}
+    assert all(v.startswith("secret:") for v in values)
+
+
+def test_build_hitl_options_basic_scope_returns_password_entries() -> None:
+    options = build_hitl_options(ACTION_HITL_SELECT, "", "basic")
+    values = {opt["value"] for opt in options}
+    assert all(v.startswith("basic:") for v in values)
+    assert any("new.engineer-password" in v for v in values)
+
+
+def test_interrupt_blocks_credential_selection_renders_external_select() -> None:
+    reason = {
+        "kind": "credential_selection",
+        "scope": "cert",
+        "prompt": "갱신/회전/초기화할 크레덴셜을 선택하세요.",
+        "options": [{"value": "cert:nginx.internal", "label": "[cert] nginx.internal"}],
+    }
+    text, blocks = build_interrupt_blocks(reason, "slack-C123-1", "int-cred")
+    assert text
+    select_block = next(b for b in blocks if b.get("accessory"))
+    assert select_block["accessory"]["type"] == "external_select"
+    assert '"session":"slack-C123-1"' in select_block["block_id"]
+    assert '"scope":"cert"' in select_block["block_id"]
+
+
+def test_interrupt_blocks_credential_renewal_cert_shows_expiry_and_method() -> None:
+    reason = {
+        "kind": "credential_renewal",
+        "target": "nginx.internal",
+        "resource_type": "nginx_certificate",
+        "record": {
+            "domain": "nginx.internal",
+            "status": "expiring_soon",
+            "expiration": "2026-07-08",
+            "days_remaining": 7,
+            "cert_type": "certbot-dns-route53",
+            "arn": "arn:aws:acm:us-east-1:111:cert/abc",
+            "account": "111",
+            "region": "us-east-1",
+            "renewal_eligible": True,
+            "renewal_status": "eligible",
+            "resource_type": "nginx_certificate",
+            "managed_via": "ssh",
+            "management_endpoint": "ssh://deploy@nginx.internal",
+            "renewal_method": "certbot renew over SSH + nginx reload",
+        },
+    }
+    text, blocks = build_interrupt_blocks(reason, "s1", "int-r1")
+    full = "\n".join(str(b) for b in blocks)
+    assert "nginx.internal" in full
+    assert "ssh" in full
+    assert text.endswith("— 승인 필요")
+
+
+def test_interrupt_blocks_credential_renewal_secret_shows_rotation_fields() -> None:
+    reason = {
+        "kind": "credential_renewal",
+        "target": "deploy-bot-signing-key",
+        "resource_type": "aws_secret",
+        "record": {
+            "name": "deploy-bot-signing-key",
+            "status": "rotation_due",
+            "rotation_enabled": False,
+            "last_rotated": "2025-12-03",
+            "days_since_rotation": 210,
+            "arn": "arn:aws:secretsmanager:us-east-1:111:secret:deploy-bot-signing-key",
+            "account": "111",
+            "region": "us-east-1",
+            "resource_type": "aws_secret",
+            "managed_via": "api",
+            "management_endpoint": "https://secretsmanager.us-east-1.amazonaws.com",
+            "renewal_method": "Secrets Manager rotation via API",
+        },
+    }
+    text, blocks = build_interrupt_blocks(reason, "s1", "int-s1")
+    full = "\n".join(str(b) for b in blocks)
+    assert "rotation" in full.lower()
+    assert text.endswith("— 승인 필요")
+
+
+def test_interrupt_blocks_credential_renewal_basic_shows_idp_fields() -> None:
+    reason = {
+        "kind": "credential_renewal",
+        "target": "new.engineer-password",
+        "resource_type": "basic_credential",
+        "record": {
+            "name": "new.engineer-password",
+            "principal": "new.engineer",
+            "idp": "AWS IAM Identity Center",
+            "status": "pending",
+            "last_changed": "(never)",
+            "days_since_change": -1,
+            "resource_type": "basic_credential",
+            "managed_via": "identity_api",
+            "management_endpoint": "https://identitycenter.amazonaws.com",
+            "renewal_method": "password reset via identity provider (IdP)",
+        },
+    }
+    text, blocks = build_interrupt_blocks(reason, "s1", "int-b1")
+    full = "\n".join(str(b) for b in blocks)
+    assert "new.engineer" in full
+    assert "IdP" in full or "identity" in full.lower()
+
+
+def test_account_delete_checklist_includes_basic_credentials() -> None:
+    reason = {
+        "kind": "account_delete",
+        "principal": "new.engineer",
+        "record": {
+            "principal": "new.engineer",
+            "type": "user",
+            "owner": "x",
+            "status": "onboarding",
+        },
+        "linked_resources": {
+            "certificates": [],
+            "secrets": [],
+            "basic_credentials": ["new.engineer-password"],
+        },
+    }
+    _text, blocks = build_interrupt_blocks(reason, "s1", "int-d1")
+    full = "\n".join(str(b) for b in blocks)
+    assert "new.engineer-password" in full
+    assert "비밀번호 비활성화" in full
 
 
 def test_maybe_send_invocation_notification_posts_certificate_notice(

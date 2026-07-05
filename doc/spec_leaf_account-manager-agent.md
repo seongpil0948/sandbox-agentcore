@@ -39,8 +39,12 @@ lifecycle. Every principal can own certificates and secrets, each with a managem
 - **Read-only tools** (Phase 1, implemented):
   - `lookup_principal(principal)` → metadata, owner, status, accounts, access, credentials, risks
   - `list_accounts` / `list_access` / `list_credentials` / `list_principals` / `list_linked_resources`
-  - `validate_onboarding` / `validate_offboarding` → readiness / offboarding risk
+  - `validate_onboarding` / `validate_offboarding` → readiness / offboarding risk. `validate_onboarding`
+    also surfaces IAM permission gaps (missing policies / assume-role grants) alongside MFA/Slack.
   - `find_stale_accounts()` → idle/ownerless/risky principals
+  - `propose_iam_terraform(principal)` → detects IAM permission gaps and proposes
+    `terraform-aws-modules/iam/aws` module blocks (advisory HCL, no live change). Rendering lives in
+    `apps/agents/iam_terraform.py`; gaps come from `IAM_ACCESS_REQUIREMENTS` in `apps/mock_data.py`.
 
 - **Write tools** (Phase 1, implemented — interrupt-based, record-only):
   - `request_account_create(tool_context, principal, principal_type="user", owner="")`

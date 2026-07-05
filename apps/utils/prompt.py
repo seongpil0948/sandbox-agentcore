@@ -2,19 +2,14 @@ from __future__ import annotations
 
 import re
 
+from apps.mock_data import PRINCIPALS
+
 DOMAIN_PATTERN = re.compile(
     r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9][a-z0-9-]{1,62}\b",
     re.IGNORECASE,
 )
 
-KNOWN_PRINCIPALS = (
-    "deploy-bot",
-    "new.engineer",
-    "leaving.contractor",
-    "payments-api",
-    "batch-runner",
-    "sandbox-orchestrator",
-)
+KNOWN_PRINCIPALS = tuple(PRINCIPALS)
 ACCOUNT_OPERATION_LABELS = {"create": "생성", "update": "수정", "delete": "삭제"}
 
 ACCOUNT_KEYWORDS = (

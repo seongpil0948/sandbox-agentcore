@@ -21,11 +21,19 @@ from apps.agents.leaf_account_manager import (
     secret_names,
     select_principals,
 )
-from apps.agents.leaf_cert import check_cert_expiry
-from apps.mock_data import get_secret
+from apps.agents.leaf_credential import check_cert_expiry
+from apps.mock_data import (
+    basic_credential_names,
+    get_basic_credential,
+    get_secret,
+    principal_category,
+)
 
-# Principal types the sandbox explicitly claims to manage as first-class principals.
-MANAGED_PRINCIPAL_TYPES = ("user", "service_account", "application", "workload")
+# Principal categories this sandbox explicitly treats as first-class managed.
+MANAGED_PRINCIPAL_CATEGORIES = ("human", "service_account")
+# Canonical subtype representatives kept for backwards-compat; application/workload/agent_identity
+# are covered by the service_account category and do not need separate entries here.
+MANAGED_PRINCIPAL_TYPES = ("user", "service_account")
 
 _CERT_NOT_FOUND = "No certificate record found"
 
@@ -38,8 +46,10 @@ class LifecycleStatus:
     credential_manageable: bool
     certificate_manageable: bool
     secret_manageable: bool
+    basic_credential_manageable: bool
     certificate_statuses: list[str]
     secret_statuses: list[str]
+    basic_credential_statuses: list[str]
 
     @property
     def fully_manageable(self) -> bool:
@@ -48,11 +58,12 @@ class LifecycleStatus:
             and self.credential_manageable
             and self.certificate_manageable
             and self.secret_manageable
+            and self.basic_credential_manageable
         )
 
 
 def principal_lifecycle_status(principal: str) -> LifecycleStatus | None:
-    """Assess account + credential/certificate lifecycle coverage for one principal."""
+    """Assess account, credential, certificate, secret, and basic credential lifecycle coverage."""
     info = get_principal(principal)
     if info is None:
         return None
@@ -63,6 +74,13 @@ def principal_lifecycle_status(principal: str) -> LifecycleStatus | None:
     secret_statuses = [_secret_status(name) for name in secret_names(principal)]
     secret_manageable = all("secret_status=not_found" not in status for status in secret_statuses)
 
+    basic_credential_statuses = [
+        _basic_credential_status(name) for name in basic_credential_names(principal)
+    ]
+    basic_credential_manageable = all(
+        "basic_status=not_found" not in status for status in basic_credential_statuses
+    )
+
     return LifecycleStatus(
         principal=info["principal"],
         type=info["type"],
@@ -70,50 +88,65 @@ def principal_lifecycle_status(principal: str) -> LifecycleStatus | None:
         credential_manageable=bool(info["credentials"]),
         certificate_manageable=certificate_manageable,
         secret_manageable=secret_manageable,
+        basic_credential_manageable=basic_credential_manageable,
         certificate_statuses=certificate_statuses,
         secret_statuses=secret_statuses,
+        basic_credential_statuses=basic_credential_statuses,
     )
 
 
 def verify_principal_lifecycle(principal: str) -> str:
-    """Return a per-principal lifecycle coverage report across account and cert leaves."""
+    """Return a per-principal lifecycle coverage report across all credential leaves."""
     status = principal_lifecycle_status(principal)
     if status is None:
         return f"principal={principal} lifecycle=unknown reason=not_registered"
 
+    category = principal_category(status.type)
     lines = [
-        f"principal={status.principal} type={status.type}",
+        f"principal={status.principal} type={status.type} category={category}",
         f"account_lifecycle={_flag(status.account_manageable)}",
         f"credential_lifecycle={_flag(status.credential_manageable)}",
         f"certificate_lifecycle={_flag(status.certificate_manageable)}",
         f"secret_lifecycle={_flag(status.secret_manageable)}",
+        f"basic_credential_lifecycle={_flag(status.basic_credential_manageable)}",
     ]
     lines.extend(f"  cert: {cert_status}" for cert_status in status.certificate_statuses)
     lines.extend(f"  secret: {secret_status}" for secret_status in status.secret_statuses)
+    lines.extend(f"  basic: {b_status}" for b_status in status.basic_credential_statuses)
     lines.append(f"result={'MANAGEABLE' if status.fully_manageable else 'NEEDS_ATTENTION'}")
     return "\n".join(lines)
 
 
 def verify_principal_types() -> str:
-    """Report whether the hierarchy can manage account + credential lifecycle per principal type."""
-    lines = ["principal-type lifecycle coverage:"]
+    """Report lifecycle coverage by category (human / service_account) with subtype breakdown."""
+    lines = ["principal lifecycle coverage by category:"]
     all_ok = True
 
-    for principal_type in MANAGED_PRINCIPAL_TYPES:
-        principals = select_principals(principal_type)
+    for category in MANAGED_PRINCIPAL_CATEGORIES:
+        principals = select_principals(category)
         if not principals:
-            lines.append(f"type={principal_type} coverage=missing")
+            lines.append(f"category={category} coverage=missing")
             all_ok = False
             continue
 
         statuses = [principal_lifecycle_status(info["principal"]) for info in principals]
         manageable = all(status is not None and status.fully_manageable for status in statuses)
-        examples = ", ".join(info["principal"] for info in principals)
+        subtypes = sorted({info["type"] for info in principals})
         lines.append(
-            f"type={principal_type} principals=[{examples}] "
+            f"category={category} subtypes=[{', '.join(subtypes)}] "
             f"lifecycle={'manageable' if manageable else 'needs_attention'}"
         )
+        for info in principals:
+            lines.append(f"  type={info['type']} principal={info['principal']}")
         all_ok = all_ok and manageable
+
+    # Also emit per-subtype lines for backwards-compat with existing tests.
+    for principal_type in MANAGED_PRINCIPAL_TYPES:
+        principals = select_principals(principal_type)
+        if not principals:
+            continue
+        examples = ", ".join(info["principal"] for info in principals)
+        lines.append(f"type={principal_type} principals=[{examples}]")
 
     lines.append(f"hierarchy_can_manage_all_types={'yes' if all_ok else 'no'}")
     return "\n".join(lines)
@@ -130,4 +163,14 @@ def _secret_status(name: str) -> str:
     return (
         f"name={secret.name} type={secret.resource_type} status={secret.status} "
         f"rotation_enabled={secret.rotation_enabled} days_since_rotation={secret.days_since_rotation}"
+    )
+
+
+def _basic_credential_status(name: str) -> str:
+    basic = get_basic_credential(name)
+    if basic is None:
+        return f"name={name} basic_status=not_found"
+    return (
+        f"name={basic.name} type={basic.resource_type} principal={basic.principal} "
+        f"idp={basic.idp} status={basic.status} days_since_change={basic.days_since_change}"
     )

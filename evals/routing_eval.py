@@ -48,13 +48,13 @@ CASES: list[Case] = [
     Case[str, str](
         name="cert-renew-no-domain",
         input="cert renew",
-        expected_output="interrupt:cert_selection",
+        expected_output="interrupt:credential_selection",
         metadata={"category": "cert", "intent": "renew"},
     ),
     Case[str, str](
         name="cert-renew-with-domain",
         input="renew the certificate for api.example.com",
-        expected_output="interrupt:cert_renewal_approval",
+        expected_output="interrupt:credential_renewal_approval",
         metadata={"category": "cert", "intent": "renew"},
     ),
     Case[str, str](
@@ -62,6 +62,24 @@ CASES: list[Case] = [
         input="what is the certificate status for api.example.com",
         expected_output="final",
         metadata={"category": "cert", "intent": "read"},
+    ),
+    Case[str, str](
+        name="secret-rotate-no-target",
+        input="rotate the signing key secret",
+        expected_output="interrupt:credential_selection",
+        metadata={"category": "secret", "intent": "rotate"},
+    ),
+    Case[str, str](
+        name="secret-rotate-with-target",
+        input="rotate deploy-bot-signing-key secret",
+        expected_output="interrupt:credential_renewal_approval",
+        metadata={"category": "secret", "intent": "rotate"},
+    ),
+    Case[str, str](
+        name="password-reset-no-target",
+        input="reset the password",
+        expected_output="interrupt:credential_selection",
+        metadata={"category": "basic", "intent": "reset"},
     ),
     Case[str, str](
         name="account-offboard",

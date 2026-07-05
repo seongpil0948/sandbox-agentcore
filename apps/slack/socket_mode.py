@@ -188,7 +188,7 @@ def process_request(client: BaseSocketModeClient, req: SocketModeRequest) -> Non
         if payload_type == "block_suggestion":
             options_req = extract_options_request(req)
             options = (
-                build_hitl_options(options_req.action_id, options_req.value)
+                build_hitl_options(options_req.action_id, options_req.value, options_req.scope)
                 if options_req is not None
                 else []
             )

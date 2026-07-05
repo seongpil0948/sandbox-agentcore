@@ -409,7 +409,7 @@ def test_process_request_serves_hitl_select_options() -> None:
     payload = fake_client.responses[0].payload
     assert "options" in payload
     values = {opt["value"] for opt in payload["options"]}
-    assert "nginx.internal" in values
+    assert "cert:nginx.internal" in values
 
 
 def test_start_in_thread_disabled_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:

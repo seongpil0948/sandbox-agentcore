@@ -354,7 +354,7 @@ doc/
 ## 🧪 Testing
 
 ```bash
-# Unit + smoke tests (92 tests, no AWS creds needed)
+# Unit + smoke tests (128 tests, no AWS creds needed)
 make check          # ruff + format-check + pyright + pytest
 
 # Individual test types

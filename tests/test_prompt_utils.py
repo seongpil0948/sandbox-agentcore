@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from apps.mock_data import PRINCIPALS
 from apps.utils.prompt import (
+    KNOWN_PRINCIPALS,
     account_operation_from_prompt,
     account_operation_label,
     extract_domain,
@@ -31,3 +33,7 @@ def test_account_prompt_helpers_find_principal_and_operation() -> None:
     assert principal_from_prompt("unknown 계정 생성 요청") == "deploy-bot"
     assert account_operation_from_prompt(prompt) == "delete"
     assert account_operation_label("delete") == "삭제"
+
+
+def test_known_principals_is_derived_from_mock_data() -> None:
+    assert set(KNOWN_PRINCIPALS) == set(PRINCIPALS)

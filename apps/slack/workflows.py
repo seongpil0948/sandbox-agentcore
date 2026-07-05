@@ -16,7 +16,7 @@ from apps.agents.leaf_account_manager import (
     validate_onboarding,
 )
 from apps.agents.leaf_cert import check_cert_expiry
-from apps.mock_data import search_certificates
+from apps.mock_data import search_certificates, search_secrets, search_basic_credentials
 from apps.slack.blockkit import button as _button
 from apps.slack.blockkit import mrkdwn as _mrkdwn
 from apps.slack.blockkit import option as _option
@@ -283,6 +283,10 @@ def build_interrupt_blocks(
         return _cert_selection_blocks(detail, session_id, interrupt_id)
     if kind == "cert_renewal":
         return _cert_renewal_blocks(detail, session_id, interrupt_id)
+    if kind == "credential_selection":
+        return _credential_selection_blocks(detail, session_id, interrupt_id)
+    if kind == "credential_renewal":
+        return _credential_renewal_blocks(detail, session_id, interrupt_id)
     if kind in {"account_create", "account_update", "account_delete"}:
         return _account_write_blocks(kind, detail, session_id, interrupt_id)
     return _generic_interrupt_blocks(reason, detail, session_id, interrupt_id)
@@ -355,6 +359,50 @@ def _cert_selection_blocks(
     return text, blocks
 
 
+def _credential_selection_blocks(
+    detail: dict[str, Any], session_id: str, interrupt_id: str
+) -> tuple[str, list[dict[str, Any]]]:
+    """Render a credential_selection interrupt as a scoped external_select picker."""
+    prompt = str(detail.get("prompt") or "갱신/회전/초기화할 크레덴셜을 선택하세요.")
+    scope = str(detail.get("scope", ""))
+    options = _as_list(detail.get("options"))
+    select_options: list[dict[str, Any]] = []
+    for entry in options:
+        if isinstance(entry, dict) and entry.get("value"):
+            select_options.append(
+                _option(str(entry.get("label") or entry["value"]), str(entry["value"]))
+            )
+    scope_labels = {"cert": "인증서", "secret": "시크릿", "basic": "비밀번호", "": "전체"}
+    scope_label = scope_labels.get(scope, scope or "전체")
+    header_text = f"크레덴셜 갱신 — {scope_label} 선택"
+    text = f"크레덴셜 선택 필요 ({scope_label})"
+    accessory: dict[str, Any] = {
+        "type": "external_select",
+        "action_id": ACTION_HITL_SELECT,
+        "min_query_length": 0,
+        "placeholder": _plain_text("크레덴셜 이름으로 검색"),
+    }
+    blocks = [
+        {"type": "header", "text": _plain_text(header_text)},
+        {
+            "type": "section",
+            "block_id": _hitl_block_id(session_id, interrupt_id, scope),
+            "text": _mrkdwn(prompt),
+            "accessory": accessory,
+        },
+    ]
+    if select_options:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    _mrkdwn("후보: " + ", ".join(f"`{opt['value']}`" for opt in select_options))
+                ],
+            }
+        )
+    return text, blocks
+
+
 def _cert_renewal_blocks(
     detail: dict[str, Any], session_id: str, interrupt_id: str
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -372,6 +420,65 @@ def _cert_renewal_blocks(
         f"  ·  *갱신 상태:* {record.get('renewal_status', 'n/a')}",
         f"*관리 방식:* {record.get('managed_via', 'n/a')} (`{record.get('management_endpoint', 'n/a')}`)",
     ]
+    blocks = [
+        {"type": "header", "text": _plain_text(title[:150])},
+        {"type": "section", "text": _mrkdwn("\n".join(lines))},
+        _approve_cancel_actions(session_id, interrupt_id),
+        _sandbox_context(),
+    ]
+    return f"{title} — 승인 필요", blocks
+
+
+def _credential_renewal_blocks(
+    detail: dict[str, Any], session_id: str, interrupt_id: str
+) -> tuple[str, list[dict[str, Any]]]:
+    """Render a credential_renewal_approval interrupt card, branching on resource_type."""
+    record = _as_dict(detail.get("record"))
+    resource_type = str(record.get("resource_type") or detail.get("resource_type", ""))
+    target = str(detail.get("target") or record.get("domain") or record.get("name") or "unknown")
+    title = str(detail.get("title") or f"크레덴셜 갱신 승인 — {target}")
+    renewal_method = str(record.get("renewal_method", "n/a"))
+
+    lines: list[str] = []
+    if "certificate" in resource_type:
+        # nginx_certificate or acm_certificate
+        lines = [
+            f"*도메인:* `{record.get('domain', target)}`",
+            f"*상태:* {record.get('status', 'n/a')}  ·  *만료:* {record.get('expiration', 'n/a')} "
+            f"({record.get('days_remaining', 'n/a')}일)",
+            f"*인증서 유형:* {record.get('cert_type', 'n/a')}",
+            f"*ARN:* `{record.get('arn', 'n/a')}`",
+            f"*계정 / 리전:* {record.get('account', 'n/a')} / {record.get('region', 'n/a')}",
+            f"*갱신 가능:* {'예' if record.get('renewal_eligible') else '아니오'}"
+            f"  ·  *갱신 상태:* {record.get('renewal_status', 'n/a')}",
+        ]
+    elif resource_type == "aws_secret":
+        lines = [
+            f"*시크릿:* `{record.get('name', target)}`",
+            f"*상태:* {record.get('status', 'n/a')}",
+            f"*자동 로테이션:* {'예' if record.get('rotation_enabled') else '아니오'}",
+            f"*마지막 로테이션:* {record.get('last_rotated', 'n/a')} "
+            f"({record.get('days_since_rotation', 'n/a')}일 전)",
+            f"*ARN:* `{record.get('arn', 'n/a')}`",
+            f"*계정 / 리전:* {record.get('account', 'n/a')} / {record.get('region', 'n/a')}",
+        ]
+    elif resource_type == "basic_credential":
+        lines = [
+            f"*크레덴셜:* `{record.get('name', target)}`",
+            f"*Principal:* {record.get('principal', 'n/a')}",
+            f"*IdP:* {record.get('idp', 'n/a')}",
+            f"*상태:* {record.get('status', 'n/a')}",
+            f"*마지막 변경:* {record.get('last_changed', 'n/a')} "
+            f"({record.get('days_since_change', 'n/a')}일 전)",
+        ]
+    else:
+        lines = [f"*대상:* `{target}`", f"*상태:* {record.get('status', 'n/a')}"]
+
+    lines.append(
+        f"*관리 방식:* {record.get('managed_via', 'n/a')} "
+        f"(`{record.get('management_endpoint', 'n/a')}`)"
+    )
+    lines.append(f"*갱신 방법:* {renewal_method}")
     blocks = [
         {"type": "header", "text": _plain_text(title[:150])},
         {"type": "section", "text": _mrkdwn("\n".join(lines))},
@@ -406,11 +513,13 @@ def _account_write_blocks(
     linked = _as_dict(detail.get("linked_resources"))
     certs = linked.get("certificates") or []
     secrets = linked.get("secrets") or []
-    if kind == "account_delete" and (certs or secrets):
+    basics = linked.get("basic_credentials") or []
+    if kind == "account_delete" and (certs or secrets or basics):
         checklist = [
             "*오프보딩 체크리스트 — 회수 대상 리소스:*",
             *(f"• 인증서 `{domain}`" for domain in certs),
             *(f"• 시크릿 `{name}`" for name in secrets),
+            *(f"• 비밀번호 비활성화 `{name}`" for name in basics),
         ]
         blocks.append({"type": "section", "text": _mrkdwn("\n".join(checklist))})
     blocks.append(_approve_cancel_actions(session_id, interrupt_id))
@@ -435,19 +544,47 @@ def _generic_interrupt_blocks(
     return text, blocks
 
 
-def _hitl_block_id(session_id: str, interrupt_id: str) -> str:
-    """Encode HITL resume context into a select block_id (external_select carries no value)."""
-    return json.dumps({"session": session_id, "interrupt_id": interrupt_id}, separators=(",", ":"))
+def _hitl_block_id(session_id: str, interrupt_id: str, scope: str = "") -> str:
+    """Encode HITL resume context (and optional scope hint) into a select block_id."""
+    data: dict[str, str] = {"session": session_id, "interrupt_id": interrupt_id}
+    if scope:
+        data["scope"] = scope
+    return json.dumps(data, separators=(",", ":"))
 
 
-def build_hitl_options(action_id: str, query: str) -> list[dict[str, Any]]:
-    """Serve external_select options for HITL selection interrupts (block_suggestion listener)."""
+def build_hitl_options(action_id: str, query: str, scope: str = "") -> list[dict[str, Any]]:
+    """Serve external_select options for HITL credential selection interrupts.
+
+    Args:
+        action_id: Slack action id of the external_select.
+        query: Search string typed by the user.
+        scope: Optional scope hint (``"cert"``, ``"secret"``, ``"basic"``, or ``""`` for all).
+    """
     if action_id != ACTION_HITL_SELECT:
         return []
-    return [
-        _option(f"{record.domain} ({record.status}, {record.days_remaining}d)", record.domain)
-        for record in search_certificates(query)
-    ]
+    options: list[dict[str, Any]] = []
+    if not scope or scope == "cert":
+        options.extend(
+            _option(
+                f"[cert] {r.domain} ({r.status}, {r.days_remaining}d)",
+                f"cert:{r.domain}",
+            )
+            for r in search_certificates(query)
+        )
+    if not scope or scope == "secret":
+        options.extend(
+            _option(f"[secret] {r.name} ({r.status})", f"secret:{r.name}")
+            for r in search_secrets(query)
+        )
+    if not scope or scope == "basic":
+        options.extend(
+            _option(
+                f"[password] {r.name} ({r.principal}, {r.status})",
+                f"basic:{r.name}",
+            )
+            for r in search_basic_credentials(query)
+        )
+    return options
 
 
 def parse_action_value(raw_value: str | None) -> dict[str, str]:

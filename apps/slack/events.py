@@ -36,6 +36,7 @@ class SlackInteractiveAction:
 class SlackOptionsRequest:
     action_id: str
     value: str
+    scope: str = ""
 
 
 def normalize_prompt(text: str) -> str:
@@ -116,7 +117,13 @@ def extract_options_request(req: SlackRequestLike) -> SlackOptionsRequest | None
     action_id = str(payload.get("action_id", "")).strip()
     if not action_id:
         return None
-    return SlackOptionsRequest(action_id=action_id, value=str(payload.get("value", "")))
+    # Decode the scope hint from the block_id json (set when the interrupt was rendered).
+    block_id = str(payload.get("block_id", ""))
+    block_ctx = parse_action_value(block_id)
+    scope = str(block_ctx.get("scope", ""))
+    return SlackOptionsRequest(
+        action_id=action_id, value=str(payload.get("value", "")), scope=scope
+    )
 
 
 def event_type_for_log(req: SlackRequestLike) -> str:

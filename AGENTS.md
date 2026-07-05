@@ -31,12 +31,12 @@ Entry: /invocations (local) or Slack mention
   │  └─ orchestrator(prompt)
   │     └─ tool: human_resource_supervisor  (hr_supervisor.as_tool)
   │        └─ hr_supervisor(query)
-  │           ├─ tool: cert_specialist  (cert_agent.as_tool)
-  │           │  └─ cert_agent(query)
+  │           ├─ tool: credential_specialist  (credential_agent.as_tool)
+  │           │  └─ credential_agent(query)
   │           │     ├─ check_cert_expiry() → text (no interrupt)
-  │           │     └─ request_certificate_renewal(tool_context, domain="")
-  │           │        ├─ context.interrupt("cert_selection", …)  ← if no/unknown domain
-  │           │        └─ context.interrupt("cert_renewal_approval", …)
+  │           │     └─ request_credential_renewal(tool_context, credential="")
+  │           │        ├─ context.interrupt("credential_selection", …)  ← if no/unknown target
+  │           │        └─ context.interrupt("credential_renewal_approval", …)
   │           │           ← PAUSES; Strands bubbles the interrupt up via as_tool
   │           │
   │           └─ tool: account_manager  (account_agent.as_tool)
@@ -70,9 +70,10 @@ forwards the human response back to the paused sub-agent. There is no custom del
 | **Workflows** | `apps/slack/workflows.py` | Block Kit builders; `build_interrupt_blocks` dispatches on `reason["kind"]`; `build_hitl_options` |
 | **Events** | `apps/slack/events.py` | Extract mention prompts, button/select actions, external_select options |
 | **Orchestrator** | `apps/agents/orchestrator.py` | Root agent; wraps `human_resource_supervisor` via `Agent.as_tool` |
-| **Supervisor** | `apps/agents/supervisor_hr.py` | HR agent; wraps `cert_specialist`, `account_manager` via `Agent.as_tool` |
-| **Cert leaf** | `apps/agents/leaf_cert.py` | Cert agent; tools: `check_cert_expiry`, `list_cert_types`, `request_certificate_renewal` (selection + approval interrupts) |
-| **Account leaf** | `apps/agents/leaf_account_manager.py` | Account agent; read tools + `request_account_create/update/delete` (approval interrupts) |
+| **Supervisor** | `apps/agents/supervisor_hr.py` | HR agent; wraps `credential_specialist`, `account_manager` via `Agent.as_tool` |
+| **Credential leaf** | `apps/agents/leaf_credential.py` | Credential agent; tools: `check_cert_expiry`, `check_credential_status`, `list_credential_types`, `request_credential_renewal` (selection + approval interrupts for certs, secrets, passwords) |
+| **Account leaf** | `apps/agents/leaf_account_manager.py` | Account agent; read tools + `propose_iam_terraform` (IAM-gap → Terraform, advisory) + `request_account_create/update/delete` (approval interrupts) |
+| **IAM Terraform** | `apps/agents/iam_terraform.py` | Renders `terraform-aws-modules/iam/aws` module blocks to close detected IAM permission gaps |
 
 ## 📚 Key patterns
 
@@ -84,7 +85,7 @@ its text — and propagates any interrupt the child raised:
 ```python
 return Agent(
     model=model,
-    tools=[cert_agent.as_tool(name="cert_specialist", description=..., preserve_context=True)],
+    tools=[credential_agent.as_tool(name="credential_specialist", description=..., preserve_context=True)],
     ...,
 )
 ```
@@ -97,10 +98,10 @@ pause/resume (only the orchestrator carries a `session_manager`).
 A leaf write-tool raises an interrupt with a **structured, channel-agnostic** reason:
 
 ```python
-# In cert leaf tool
+# In credential leaf tool
 decision = tool_context.interrupt(
-    name="cert_renewal_approval",
-    reason={"kind": "cert_renewal", "record": {"domain": domain, "managed_via": "ssh", ...}},
+    name="credential_renewal_approval",
+    reason={"kind": "credential_renewal", "resource_type": "nginx_certificate", "record": {...}},
 )
 ```
 
@@ -110,9 +111,9 @@ to Block Kit, and `hitl.resume()` forwards the human response back to the paused
 
 ### Two-phase write tools
 
-A single write tool can raise interrupts sequentially. `request_certificate_renewal` first raises
-`cert_selection` (when no domain was given) so the human picks a certificate via an
-`external_select`, then raises `cert_renewal_approval` for the final [승인]/[취소] decision.
+A single write tool (`request_credential_renewal`) can raise interrupts sequentially for any credential type. It first raises
+`credential_selection` (when no target is given) so the human picks a credential via an
+`external_select` (scoped to cert/secret/basic), then raises `credential_renewal_approval` for the final [승인]/[취소] decision.
 
 ### Session persistence
 
@@ -173,7 +174,7 @@ Detailed agent specifications live in `doc/`:
 ### Setup
 ```bash
 make sync          # Install + setup .venv
-make check         # ruff + format-check + pyright + pytest (92 tests pass)
+make check         # ruff + format-check + pyright + pytest (128 tests pass)
 ```
 
 ### Local run
@@ -230,7 +231,7 @@ make test -c
 ✅ Cert renewal: `cert_selection` (external_select) → `cert_renewal_approval` interrupts + Block Kit UI  
 ✅ Account read tools + `request_account_create/update/delete` approval interrupts  
 ✅ Management methods on records (`managed_via` SSH/HTTP + `management_endpoint`)  
-✅ Full test coverage (92 tests pass) + end-to-end HITL smoke  
+✅ Full test coverage (128 tests pass) + end-to-end HITL smoke  
 ✅ Documentation (README + specs)  
 
 ## 🔮 Phase 2 (future)

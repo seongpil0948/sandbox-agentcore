@@ -17,12 +17,16 @@ _SUPERVISOR_TOOL_DESCRIPTION = (
 
 
 def _supervisor_tool(model: BedrockModel, supervisor_arn: str | None) -> AgentTool:
-    """Build the HR-supervisor tool: a remote runtime call or an in-process sub-agent."""
+    """Return the HR supervisor tool for the active deployment mode.
+
+    If ``supervisor_arn`` is provided, calls the remote supervisor runtime.
+    Otherwise, wraps the in-process HR supervisor agent as a tool.
+    """
     if supervisor_arn:
 
         @tool(name="human_resource_supervisor")
         def human_resource_supervisor(query: str) -> str:
-            """Delegate HR, identity management, user, and certificate queries to the HR supervisor."""
+            """Forward HR and identity requests to the remote HR supervisor runtime."""
             return invoke_agent_runtime_text(supervisor_arn, query)
 
         return human_resource_supervisor
@@ -42,10 +46,11 @@ def build_orchestrator(
 ) -> Agent:
     """Build the root orchestrator.
 
-    The HR supervisor is wrapped with ``Agent.as_tool`` so Strands propagates any nested
-    human-in-the-loop interrupt (raised deep in a leaf) up to this top-level agent and forwards
-    the human response back down on resume. Only the orchestrator carries the ``session_manager``
-    (one durable session per conversation); nested agents stay alive in-process for the resume.
+    When the supervisor runs in-process, it is wrapped with ``Agent.as_tool`` so Strands can
+    propagate nested human-in-the-loop interrupts from leaf agents to this top-level agent and
+    forward the human response back down on resume. Only the orchestrator carries the
+    ``session_manager`` (one durable session per conversation); nested agents remain in-process
+    across resume cycles.
     """
     return Agent(
         model=model,

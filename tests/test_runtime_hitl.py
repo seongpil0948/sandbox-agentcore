@@ -6,12 +6,12 @@ import pytest
 from strands.interrupt import Interrupt
 
 from apps.agents.leaf_account_manager import _account_reason
-from apps.agents.leaf_cert import (
-    _execute_renewal,
+from apps.agents.leaf_credential import (
+    _execute_credential_renewal,
     _renewal_reason,
     _selection_reason,
 )
-from apps.mock_data import get_certificate
+from apps.mock_data import get_basic_credential, get_certificate, get_secret
 from apps.runtime import hitl
 from apps.runtime.session import build_session_manager, slack_session_key
 
@@ -144,21 +144,21 @@ def test_resume_returns_busy_when_session_locked(monkeypatch: pytest.MonkeyPatch
 
 
 # --------------------------------------------------------------------------------------
-# cert leaf write-tool interrupt payloads (rendered by the Slack layer)
+# credential leaf write-tool interrupt payloads (rendered by the Slack layer)
 # --------------------------------------------------------------------------------------
 def test_cert_selection_reason_lists_all_certificates() -> None:
     reason = _selection_reason()
-    assert reason["kind"] == "cert_selection"
+    assert reason["kind"] == "credential_selection"
     values = {opt["value"] for opt in reason["options"]}
-    assert "nginx.internal" in values
-    assert "api.example.com" in values
+    assert "cert:nginx.internal" in values
+    assert "cert:api.example.com" in values
 
 
 def test_cert_renewal_reason_carries_management_method() -> None:
     record = get_certificate("nginx.internal")
     assert record is not None
     reason = _renewal_reason(record)
-    assert reason["kind"] == "cert_renewal"
+    assert reason["kind"] == "credential_renewal"
     assert reason["record"]["managed_via"] == "ssh"
     assert reason["record"]["management_endpoint"] == "ssh://deploy@nginx.internal"
 
@@ -166,7 +166,7 @@ def test_cert_renewal_reason_carries_management_method() -> None:
 def test_execute_renewal_records_ssh_path() -> None:
     record = get_certificate("nginx.internal")
     assert record is not None
-    result = _execute_renewal(record)
+    result = _execute_credential_renewal(record)
     assert "nginx -s reload" in result
     assert "ssh://deploy@nginx.internal" in result
     assert "no live change" in result
@@ -175,7 +175,7 @@ def test_execute_renewal_records_ssh_path() -> None:
 def test_execute_renewal_records_acm_api_path() -> None:
     record = get_certificate("api.example.com")
     assert record is not None
-    result = _execute_renewal(record)
+    result = _execute_credential_renewal(record)
     assert "ACM renewal" in result
     assert "https://acm.us-east-1.amazonaws.com" in result
 
@@ -183,8 +183,46 @@ def test_execute_renewal_records_acm_api_path() -> None:
 def test_execute_renewal_flags_non_eligible_cert() -> None:
     record = get_certificate("old.example.com")
     assert record is not None
-    result = _execute_renewal(record)
+    result = _execute_credential_renewal(record)
     assert "not auto-renewable" in result
+
+
+def test_execute_renewal_records_secret_rotation_path() -> None:
+    record = get_secret("deploy-bot-signing-key")
+    assert record is not None
+    result = _execute_credential_renewal(record)
+    assert "rotation" in result.lower()
+    assert "no live change" in result
+
+
+def test_execute_renewal_records_basic_credential_reset_path() -> None:
+    record = get_basic_credential("new.engineer-password")
+    assert record is not None
+    result = _execute_credential_renewal(record)
+    assert "password reset" in result.lower()
+    assert "mfa" in result.lower()
+    assert "no live change" in result
+
+
+def test_selection_reason_scoped_cert_only_contains_cert_options() -> None:
+    reason = _selection_reason("cert")
+    assert reason["scope"] == "cert"
+    values = {opt["value"] for opt in reason["options"]}
+    assert all(v.startswith("cert:") for v in values)
+    assert "secret:" not in " ".join(values)
+
+
+def test_selection_reason_scoped_secret_only_contains_secret_options() -> None:
+    reason = _selection_reason("secret")
+    values = {opt["value"] for opt in reason["options"]}
+    assert all(v.startswith("secret:") for v in values)
+
+
+def test_selection_reason_scoped_basic_only_contains_basic_options() -> None:
+    reason = _selection_reason("basic")
+    values = {opt["value"] for opt in reason["options"]}
+    assert all(v.startswith("basic:") for v in values)
+    assert "new.engineer-password" in " ".join(values)
 
 
 # --------------------------------------------------------------------------------------
